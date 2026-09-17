@@ -88,6 +88,17 @@ EVENT_ALIASES = {
     ): "Noche UFC: Grasso vs. Shevchenko 2",
 }
 
+# ============================================================
+# METADADOS DE EVENTOS AUSENTES
+# ============================================================
+
+MISSING_EVENT_METADATA = {
+    normalize_text("UFC - Road to UFC 4.6"): {
+        "date": "August 22, 2025",
+        "location": "Shanghai, Hebei, China",
+    },
+}
+
 
 def canonical_event_name(event_name):
     """
@@ -350,13 +361,18 @@ def build_events(
     ]
 
     for event_name in missing_events:
+        metadata = MISSING_EVENT_METADATA.get(
+            normalize_text(event_name),
+            {}
+        )
+
         events.loc[len(events)] = {
             "event_id": synthetic_event_id(
                 event_name
             ),
             "event_name": event_name,
-            "date": None,
-            "location": None,
+            "date": metadata.get("date"),
+            "location": metadata.get("location"),
         }
 
     events = events.drop_duplicates(
