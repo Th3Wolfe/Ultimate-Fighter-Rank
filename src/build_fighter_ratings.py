@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -16,21 +17,58 @@ OUTPUT_FILE = FEATURES_DIR / "fighter_ratings.csv"
 # Parâmetros do Elo.
 #
 # Estes valores são um ponto de partida, não uma escolha
-# validada. Devem ser comparados empiricamente com outras
-# configurações via avaliação temporal (ver
-# docs/rating_methodology.md, seções 4.2, 23 e 24) antes de
-# serem considerados definitivos.
+# validada (ver docs/rating_methodology.md, seção 37.4). Para
+# compará-los empiricamente com outras configurações, ver
+# src/param_sweep.py (seção 53, item 5 do development_guideline.md),
+# que reaproveita EloConfig/build_ratings/validate_output daqui
+# em vez de duplicar esta lógica.
 # ============================================================
 
-INITIAL_RATING = 1500.0
-BASE_K = 32.0
-BOOSTED_K = 64.0
-SCALE = 400.0
 
-# Número de lutas, após a estreia ou após uma mudança de
-# divisão, em que o rating é considerado de baixa confiança
-# e recebe um K-factor maior para se recalibrar mais rápido.
-PROVISIONAL_FIGHTS = 3
+@dataclass(frozen=True)
+class EloConfig:
+    """
+    Agrupa os parâmetros livres do Elo v0.1, para permitir rodar
+    `build_ratings()` com configurações diferentes (sweep de
+    parâmetros) sem duplicar `build_fighter_ratings.py`.
+
+    Os valores default reproduzem exatamente o baseline v0.1
+    (docs/rating_methodology.md, seção 37.4).
+    """
+
+    initial_rating: float = 1500.0
+    base_k: float = 32.0
+    boosted_k: float = 64.0
+    scale: float = 400.0
+
+    # Número de lutas, após a estreia ou após uma mudança de
+    # divisão, em que o rating é considerado de baixa confiança
+    # e recebe um K-factor maior para se recalibrar mais rápido.
+    provisional_fights: int = 3
+
+    @property
+    def label(self):
+        """Identificador curto e determinístico, usado como sufixo
+        de arquivo em runs com configuração não-default (sweep)."""
+
+        return (
+            f"init{self.initial_rating:.0f}"
+            f"_base{self.base_k:.0f}"
+            f"_boost{self.boosted_k:.0f}"
+            f"_scale{self.scale:.0f}"
+            f"_prov{self.provisional_fights}"
+        )
+
+
+DEFAULT_CONFIG = EloConfig()
+
+# Aliases mantidos para retrocompatibilidade (valores do baseline
+# v0.1, iguais aos defaults de EloConfig).
+INITIAL_RATING = DEFAULT_CONFIG.initial_rating
+BASE_K = DEFAULT_CONFIG.base_k
+BOOSTED_K = DEFAULT_CONFIG.boosted_k
+SCALE = DEFAULT_CONFIG.scale
+PROVISIONAL_FIGHTS = DEFAULT_CONFIG.provisional_fights
 
 # Categorias que não representam uma divisão de peso padrão.
 # Nunca contam como "mudança de divisão" ao comparar com a
@@ -151,10 +189,16 @@ def expected_score(rating_a, rating_b, scale=SCALE):
     return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / scale))
 
 
-def build_ratings(fights):
+def build_ratings(fights, config=DEFAULT_CONFIG):
     """
     Processa as lutas em ordem cronológica e calcula o Elo de
     cada lutador antes e depois de cada luta.
+
+    `config` (EloConfig) carrega os parâmetros livres do Elo
+    (initial_rating, base_k, boosted_k, scale, provisional_fights).
+    O default reproduz o baseline v0.1. Passar uma `EloConfig`
+    diferente permite comparar configurações (ver
+    src/param_sweep.py) sem duplicar esta função.
 
     Decisões metodológicas aplicadas (registradas em
     docs/rating_methodology.md, seção "37. Decisões
@@ -170,11 +214,12 @@ def build_ratings(fights):
       para fins de força competitiva), mas conta normalmente
       na contagem de lutas de cada um.
     - Empate atualiza os dois ratings com resultado 0.5 / 0.5.
-    - A estreia de um lutador e as PROVISIONAL_FIGHTS lutas
-      seguintes a uma mudança de divisão usam um K-factor maior
-      (BOOSTED_K), para permitir uma recalibração mais rápida
-      em cenários de alta incerteza. Isso é um parâmetro a ser
-      validado, não uma regra definitiva.
+    - A estreia de um lutador e as `config.provisional_fights`
+      lutas seguintes a uma mudança de divisão usam um K-factor
+      maior (`config.boosted_k`), para permitir uma recalibração
+      mais rápida em cenários de alta incerteza. Isso é um
+      parâmetro a ser validado, não uma regra definitiva (seção
+      37.4) — ver src/param_sweep.py para a comparação empírica.
     """
 
     fights = fights.sort_values(
@@ -187,19 +232,19 @@ def build_ratings(fights):
     current_division = {}
 
     def ensure_known(fighter_id):
-        rating.setdefault(fighter_id, INITIAL_RATING)
+        rating.setdefault(fighter_id, config.initial_rating)
         fights_count.setdefault(fighter_id, 0)
         fights_since_switch.setdefault(fighter_id, 0)
         current_division.setdefault(fighter_id, None)
 
     def is_provisional(fighter_id):
         return (
-            fights_count[fighter_id] < PROVISIONAL_FIGHTS
-            or fights_since_switch[fighter_id] < PROVISIONAL_FIGHTS
+            fights_count[fighter_id] < config.provisional_fights
+            or fights_since_switch[fighter_id] < config.provisional_fights
         )
 
     def k_factor(fighter_id):
-        return BOOSTED_K if is_provisional(fighter_id) else BASE_K
+        return config.boosted_k if is_provisional(fighter_id) else config.base_k
 
     rows = []
 
@@ -238,7 +283,9 @@ def build_ratings(fights):
         rating_1_before = rating[fighter_1_id]
         rating_2_before = rating[fighter_2_id]
 
-        expected_1 = expected_score(rating_1_before, rating_2_before)
+        expected_1 = expected_score(
+            rating_1_before, rating_2_before, scale=config.scale
+        )
         expected_2 = 1.0 - expected_1
 
         result_1 = fight.fighter_1_result
@@ -320,7 +367,7 @@ def build_ratings(fights):
     return pd.DataFrame(rows)
 
 
-def validate_output(ratings, fights):
+def validate_output(ratings, fights, initial_rating=DEFAULT_CONFIG.initial_rating):
     errors = []
 
     expected_rows = len(fights) * 2
@@ -346,7 +393,7 @@ def validate_output(ratings, fights):
     first_fights = ratings["career_fights_before"] == 0
 
     invalid_first = (
-        ratings.loc[first_fights, "rating_before"] != INITIAL_RATING
+        ratings.loc[first_fights, "rating_before"] != initial_rating
     )
 
     if invalid_first.any():
@@ -420,19 +467,14 @@ def validate_output(ratings, fights):
     print("Continuidade rating_before/rating_after: OK")
 
 
-def main():
-    print("=== BUILD FIGHTER RATINGS (Elo) ===")
-
-    print("\nLendo fights.csv...")
+def load_and_merge_fights():
+    """Lê fights.csv/events.csv, valida e devolve fights já com a
+    coluna `date` do evento mesclada. Reaproveitado por `main()` e
+    por `src/param_sweep.py`, para não duplicar o carregamento de
+    dados a cada configuração testada."""
 
     fights = pd.read_csv(FIGHTS_FILE)
-
-    print(f"Lutas carregadas: {len(fights)}")
-
-    print("\nLendo events.csv...")
-
     events = pd.read_csv(EVENTS_FILE)
-
     events["date"] = pd.to_datetime(events["date"])
 
     validate_input(fights, events)
@@ -456,50 +498,82 @@ def main():
             "data de evento."
         )
 
-    print("\nCalculando ratings Elo...")
+    return fights
 
-    ratings = build_ratings(fights)
 
-    validate_output(ratings, fights)
+def run_pipeline(fights, config=DEFAULT_CONFIG, output_file=OUTPUT_FILE, verbose=True):
+    """
+    Calcula os ratings de Elo para `fights` com `config`, valida e
+    salva em `output_file`.
+
+    Extraído de `main()` para ser reaproveitado por
+    `src/param_sweep.py` (seção 53, item 5 do
+    development_guideline.md), rodando a mesma lógica com
+    configurações diferentes sem duplicar o script.
+    """
+
+    if verbose:
+        print(f"\nCalculando ratings Elo (config={config.label})...")
+
+    ratings = build_ratings(fights, config=config)
+
+    validate_output(ratings, fights, initial_rating=config.initial_rating)
 
     ratings = ratings.sort_values(
         ["date", "fight_id", "fighter_id"]
     ).reset_index(drop=True)
 
-    ratings.to_csv(OUTPUT_FILE, index=False)
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    ratings.to_csv(output_file, index=False)
 
-    print("\nArquivo salvo em:")
-    print(OUTPUT_FILE)
+    if verbose:
+        print("\nArquivo salvo em:")
+        print(output_file)
 
-    print("\n=== RESUMO ===")
-    print(f"Participações:            {len(ratings)}")
-    print(f"Lutadores:                {ratings['fighter_id'].nunique()}")
-    print(f"Estreias:                 {ratings['is_debut'].sum()}")
-    print(
-        f"Mudanças de divisão:      "
-        f"{ratings['is_division_change'].sum()}"
-    )
-    print(
-        f"No Contest (sem update):  "
-        f"{(~ratings['rating_updated']).sum()}"
-    )
-    print(
-        f"Divisão não identificada: "
-        f"{ratings['division'].isna().sum()}"
-    )
+        print("\n=== RESUMO ===")
+        print(f"Participações:            {len(ratings)}")
+        print(f"Lutadores:                {ratings['fighter_id'].nunique()}")
+        print(f"Estreias:                 {ratings['is_debut'].sum()}")
+        print(
+            f"Mudanças de divisão:      "
+            f"{ratings['is_division_change'].sum()}"
+        )
+        print(
+            f"No Contest (sem update):  "
+            f"{(~ratings['rating_updated']).sum()}"
+        )
+        print(
+            f"Divisão não identificada: "
+            f"{ratings['division'].isna().sum()}"
+        )
 
-    latest = (
-        ratings.sort_values(["fighter_id", "date", "fight_id"])
-        .groupby("fighter_id")
-        .tail(1)
-        .sort_values("rating_after", ascending=False)
-        .head(10)
-    )
+        latest = (
+            ratings.sort_values(["fighter_id", "date", "fight_id"])
+            .groupby("fighter_id")
+            .tail(1)
+            .sort_values("rating_after", ascending=False)
+            .head(10)
+        )
 
-    print("\nTop 10 ratings atuais:")
+        print("\nTop 10 ratings atuais:")
 
-    for row in latest.itertuples(index=False):
-        print(f"  {row.rating_after:8.1f}  {row.fighter_id}")
+        for row in latest.itertuples(index=False):
+            print(f"  {row.rating_after:8.1f}  {row.fighter_id}")
+
+    return ratings
+
+
+def main():
+    print("=== BUILD FIGHTER RATINGS (Elo) ===")
+
+    print("\nLendo fights.csv...")
+
+    fights = load_and_merge_fights()
+
+    print(f"Lutas carregadas: {len(fights)}")
+
+    run_pipeline(fights, config=DEFAULT_CONFIG, output_file=OUTPUT_FILE, verbose=True)
 
     print("\n=== CONCLUÍDO ===")
 

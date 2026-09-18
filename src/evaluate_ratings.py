@@ -128,11 +128,18 @@ def win_rate_probability(win_rate_a, win_rate_b):
     return win_rate_a / denominator
 
 
-def load_inputs():
+def load_inputs(ratings_file=RATINGS_FILE, history_file=HISTORY_FILE):
+    """
+    `ratings_file`/`history_file` são parametrizáveis para que
+    `src/param_sweep.py` possa reaproveitar este harness apontando
+    para um `fighter_ratings.csv` alternativo (uma config de Elo
+    diferente) sem duplicar a lógica de avaliação.
+    """
+
     fights = pd.read_csv(FIGHTS_FILE)
     events = pd.read_csv(EVENTS_FILE)
-    ratings = pd.read_csv(RATINGS_FILE)
-    history = pd.read_csv(HISTORY_FILE)
+    ratings = pd.read_csv(ratings_file)
+    history = pd.read_csv(history_file)
 
     events["date"] = pd.to_datetime(events["date"])
     ratings["date"] = pd.to_datetime(ratings["date"])
@@ -140,7 +147,7 @@ def load_inputs():
     return fights, events, ratings, history
 
 
-def build_evaluation_dataset(fights, events, ratings, history):
+def build_evaluation_dataset(fights, events, ratings, history, verbose=True):
     """
     Monta um dataset com uma linha por luta (do ponto de vista do
     fighter_1), contendo:
@@ -236,15 +243,16 @@ def build_evaluation_dataset(fights, events, ratings, history):
             "estão sincronizados (mesmo fights.csv de origem)."
         )
 
-    print("\n=== CONSTRUÇÃO DO DATASET DE AVALIAÇÃO ===")
-    print(f"Lutas totais em fights.csv: {n_total}")
-    print(f"  Excluídas por Draw: {n_draw}")
-    print(f"  Excluídas por No Contest: {n_no_contest}")
-    print(f"Lutas avaliáveis: {len(dataset)}")
-    print(
-        f"  Estreantes/degenerados no Win Rate (p=0.5 por regra): "
-        f"{(dataset['win_rate_before_1'].isna() | dataset['win_rate_before_2'].isna()).sum()}"
-    )
+    if verbose:
+        print("\n=== CONSTRUÇÃO DO DATASET DE AVALIAÇÃO ===")
+        print(f"Lutas totais em fights.csv: {n_total}")
+        print(f"  Excluídas por Draw: {n_draw}")
+        print(f"  Excluídas por No Contest: {n_no_contest}")
+        print(f"Lutas avaliáveis: {len(dataset)}")
+        print(
+            f"  Estreantes/degenerados no Win Rate (p=0.5 por regra): "
+            f"{(dataset['win_rate_before_1'].isna() | dataset['win_rate_before_2'].isna()).sum()}"
+        )
 
     return dataset[
         [
@@ -328,22 +336,23 @@ def print_metrics_table(rows):
 # ============================================================
 
 
-def run_simple_split(dataset, cutoff_date):
+def run_simple_split(dataset, cutoff_date, verbose=True):
     cutoff = pd.Timestamp(cutoff_date)
 
     train = dataset[dataset["date"] < cutoff]
     test = dataset[dataset["date"] >= cutoff]
 
-    print("\n=== SPLIT TEMPORAL SIMPLES ===")
-    print(f"Corte: {cutoff.date()}")
-    print(
-        f"Treino (contexto histórico, não há fit): {len(train)} lutas "
-        f"({train['date'].min().date()} a {train['date'].max().date()})"
-    )
-    print(
-        f"Teste: {len(test)} lutas "
-        f"({test['date'].min().date()} a {test['date'].max().date()})"
-    )
+    if verbose:
+        print("\n=== SPLIT TEMPORAL SIMPLES ===")
+        print(f"Corte: {cutoff.date()}")
+        print(
+            f"Treino (contexto histórico, não há fit): {len(train)} lutas "
+            f"({train['date'].min().date()} a {train['date'].max().date()})"
+        )
+        print(
+            f"Teste: {len(test)} lutas "
+            f"({test['date'].min().date()} a {test['date'].max().date()})"
+        )
 
     rows = []
 
@@ -352,8 +361,9 @@ def run_simple_split(dataset, cutoff_date):
         metrics = compute_metrics(test["y"], test[prob_col])
         rows.append({"model": model, "fold": "test (simple split)", **metrics})
 
-    print()
-    print_metrics_table(rows)
+    if verbose:
+        print()
+        print_metrics_table(rows)
 
     return pd.DataFrame(rows), test
 
@@ -373,10 +383,11 @@ def generate_walk_forward_folds(dataset, first_test_start, step_years):
     return folds
 
 
-def run_walk_forward(dataset, first_test_start, step_years):
+def run_walk_forward(dataset, first_test_start, step_years, verbose=True):
     folds = generate_walk_forward_folds(dataset, first_test_start, step_years)
 
-    print("\n=== WALK-FORWARD (JANELAS EXPANSIVAS) ===")
+    if verbose:
+        print("\n=== WALK-FORWARD (JANELAS EXPANSIVAS) ===")
 
     rows = []
     pooled_test = {model: [] for model in MODELS}
@@ -392,10 +403,11 @@ def run_walk_forward(dataset, first_test_start, step_years):
 
         fold_label = f"{test_start.date()}→{test_end.date()}"
 
-        print(
-            f"\nFold {fold_label} | treino (histórico até aqui): "
-            f"{len(train)} lutas | teste: {len(test)} lutas"
-        )
+        if verbose:
+            print(
+                f"\nFold {fold_label} | treino (histórico até aqui): "
+                f"{len(train)} lutas | teste: {len(test)} lutas"
+            )
 
         for model in MODELS:
             prob_col = PROB_COLUMNS[model]
@@ -403,12 +415,10 @@ def run_walk_forward(dataset, first_test_start, step_years):
             rows.append({"model": model, "fold": fold_label, **metrics})
             pooled_test[model].append(test[["y", prob_col]])
 
-    print()
-    print_metrics_table(rows)
-
-    # Métricas agregadas sobre todo o período de teste combinado
-    # (todas as janelas de teste empilhadas, sem sobreposição).
-    print("\n--- Agregado (todas as janelas de teste, sem sobreposição) ---")
+    if verbose:
+        print()
+        print_metrics_table(rows)
+        print("\n--- Agregado (todas as janelas de teste, sem sobreposição) ---")
 
     pooled_rows = []
 
@@ -418,9 +428,38 @@ def run_walk_forward(dataset, first_test_start, step_years):
         metrics = compute_metrics(pooled["y"], pooled[prob_col])
         pooled_rows.append({"model": model, "fold": "pooled test", **metrics})
 
-    print_metrics_table(pooled_rows)
+    if verbose:
+        print_metrics_table(pooled_rows)
 
     return pd.DataFrame(rows + pooled_rows)
+
+
+def evaluate_elo_config(fights, events, history, ratings_file, verbose=False):
+    """
+    Reaproveita o harness de avaliação (dataset + split simples +
+    walk-forward) para um `fighter_ratings.csv` alternativo, sem
+    duplicar a lógica de `main()`. Usado por `src/param_sweep.py`
+    para comparar configurações de Elo (seção 53, item 5 do
+    development_guideline.md).
+
+    `fights`/`events`/`history` são recebidos já carregados (o
+    sweep os lê uma única vez, já que não mudam entre configs);
+    apenas os ratings mudam por config.
+    """
+
+    ratings = pd.read_csv(ratings_file)
+    ratings["date"] = pd.to_datetime(ratings["date"])
+
+    dataset = build_evaluation_dataset(fights, events, ratings, history, verbose=verbose)
+
+    simple_split_metrics, _ = run_simple_split(
+        dataset, SIMPLE_SPLIT_CUTOFF, verbose=verbose
+    )
+    walk_forward_metrics = run_walk_forward(
+        dataset, WALK_FORWARD_FIRST_TEST_START, WALK_FORWARD_STEP_YEARS, verbose=verbose
+    )
+
+    return pd.concat([simple_split_metrics, walk_forward_metrics], ignore_index=True)
 
 
 def main():
