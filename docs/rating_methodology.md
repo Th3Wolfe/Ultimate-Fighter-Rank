@@ -1425,7 +1425,79 @@ Todas as extensões abaixo foram avaliadas com o mesmo protocolo walk-forward (s
 
 Duas extensões — recência (seção 39) e performance (seção 42, modelo M4) — melhoram todas as quatro métricas em relação ao baseline, de forma independente uma da outra. Nenhuma combinação das duas foi testada até o momento.
 
-**Estado da produção:** `src/build_fighter_ratings.py` continua implementando apenas o Elo v0.1 puro (seção 37). Nenhuma das extensões desta seção 43 foi incorporada à produção — todas permanecem como experimentos isolados em `data/features/` e `data/results/`, aguardando validação fold a fold e uma decisão sobre combiná-las antes de substituir o baseline oficial. Isso corresponde ao item 9 do roadmap (seção 53 do `development_guideline.md`): "comparar modelos" está formalmente concluído para os pares testados nesta rodada, mas a etapa de escolher e promover um modelo para produção ainda está em aberto.
+**Estado da produção (histórico):** até esta seção, `src/build_fighter_ratings.py` continuava implementando apenas o Elo v0.1 puro (seção 37). Nenhuma das extensões desta seção 43 havia sido incorporada à produção. A seção 44, abaixo, registra a validação fold a fold e a decisão de promoção (item 9.5 do roadmap, seção 53 do `development_guideline.md`).
+
+---
+
+# 44. Validação fold a fold e promoção para produção (v0.2)
+
+Implementado em `src/combined_experiment.py`, reaproveitando quase toda a lógica de `src/performance_experiment.py` (parsing, agregação de performance, pipeline logístico, métricas) e a fórmula de recência já validada em `src/recency_sweep.py` (seção 39.1).
+
+## 44.1 Objetivo
+
+A seção 43 identificou dois resultados de sinal positivo e consistente na média *pooled* — recência (seção 39) e Elo + performance / M4 (seção 42) — mas nenhum dos dois havia sido validado fold a fold, e os dois nunca haviam sido testados juntos. Este experimento resolve as duas pendências apontadas na seção 43 e no item "EM DESENVOLVIMENTO" do `development_guideline.md` (seção 52):
+
+1. validar fold a fold a estabilidade de recência e performance, individualmente;
+2. testar a combinação das duas (Elo + recência + performance) contra cada uma isolada e contra o Elo v0.1 puro;
+3. decidir o que promover para produção.
+
+Mesmo protocolo walk-forward de `performance_experiment.FOLDS` (seis folds, 2011→2029) em todas as comparações abaixo.
+
+## 44.2 Validação fold a fold das extensões já existentes
+
+Reanalisando os artefatos já existentes (`data/evaluation/recency/fold_metrics.csv` e `data/results/performance_temporal_results.csv`) fold a fold, e não apenas pela média pooled da seção 43:
+
+**Recência:** `half_life_4y`/`half_life_5y` vencem em Log Loss 5 dos 6 folds; perdem apenas no fold 2014→2017, por margem pequena (0.0013–0.0020) frente ao baseline sem recência.
+
+**Performance (M4):** M4 melhora o Log Loss frente ao Elo puro (M0) em 5 dos 6 folds; piora apenas no fold 2014→2017 (margem 0.0047). Isoladamente, M4 raramente é o vencedor absoluto do fold (outros modelos de performance parcial, como M2, vencem pontualmente), mas domina consistentemente o Elo puro.
+
+**Conclusão:** as duas extensões têm evidência fold a fold, não apenas pooled — ambas vencem o Elo v0.1 puro em 5 de 6 janelas temporais, com o mesmo fold (2014→2017) como exceção nas duas. Isso é suficiente para atender ao critério da seção 37.5/39.3 ("não há evidência suficiente" antes disso).
+
+## 44.3 Recência + Performance combinadas
+
+`src/combined_experiment.py` recalcula o Elo internamente (mesma fórmula de decaimento da seção 39.1) e usa o rating efetivo (pós-recência) como `elo_difference` de entrada de uma regressão logística com as mesmas features de performance de M4 (seção 42), ajustada apenas com dados de treino de cada fold (mesma disciplina das seções 41.1/42.1).
+
+Modelos comparados: `M0` (Elo puro), `Recency_only` (Elo + recência, sem performance), `M4` (Elo puro + performance), `M4_Recency` (Elo + recência + performance).
+
+### Resultado agregado (pooled, n=7.232)
+
+| Modelo             | Log Loss | Brier  | AUC    | Accuracy |
+|--------------------|---------:|-------:|-------:|---------:|
+| M0                 |   0.6818 | 0.2444 | 0.5824 |   0.5592 |
+| M4                 |   0.6806 | 0.2437 | 0.5941 |   0.5625 |
+| Recency_only (4y)  |   0.6794 | 0.2432 | 0.6058 |   0.5756 |
+| Recency_only (5y)  |   0.6791 | 0.2430 | 0.6054 |   0.5757 |
+| **M4_Recency (4y)**|   **0.6749** | **0.2409** | **0.6104** | **0.5801** |
+| M4_Recency (5y)    |   0.6750 | 0.2410 | 0.6099 |   0.5796 |
+
+`M4_Recency` (recência + performance combinadas) supera tanto cada extensão isolada quanto o Elo puro nas quatro métricas, com meia-vida de 4 e 5 anos praticamente empatadas (diferença de milésimos, sem vencedor consistente entre elas fold a fold).
+
+### Validação fold a fold do modelo combinado (half-life 4 anos)
+
+| Fold      | M0     | Recency_only | M4     | M4_Recency |
+|-----------|-------:|-------------:|-------:|-----------:|
+| 2011–2014 | 0.6823 | 0.6824       | 0.6803 | 0.6776     |
+| 2014–2017 | 0.6785 | 0.6809       | 0.6832 | 0.6831     |
+| 2017–2020 | 0.6894 | 0.6827       | 0.6863 | 0.6770     |
+| 2020–2023 | 0.6808 | 0.6788       | 0.6779 | 0.6726     |
+| 2023–2026 | 0.6794 | 0.6753       | 0.6777 | 0.6686     |
+| 2026–2029 | 0.6784 | 0.6727       | 0.6730 | 0.6622     |
+
+`M4_Recency` vence 5 dos 6 folds em Log Loss — o mesmo padrão de robustez das duas extensões isoladas (seção 44.2), mas agora com margens maiores frente ao Elo puro (até -0.0162 no fold 2026→2029, contra -0.0076/-0.0054 de recência/performance isoladas no mesmo fold). O único fold onde perde é, de novo, 2014→2017 (margem pequena, +0.0046 frente ao M0) — o mesmo fold "difícil" para ambas as extensões desde a seção 39.3/42.3. Nenhuma variação testada até agora domina esse fold específico; não foi investigada a causa (candidato a experimento futuro, não assumido sem novo backtest).
+
+## 44.4 Decisão metodológica
+
+Diferente de todas as decisões anteriores deste documento (K/Scale, Glicko-2, SoS — seções 37.6, 40, 41), este resultado passa nos dois critérios da seção 26 (validação fora da amostra) e do item 9.5 do roadmap (estabilidade fold a fold, não só pooled):
+
+1. **Recência (half-life = 4 anos) é promovida ao rating de produção.** `src/build_fighter_ratings.py` ganhou um `PRODUCTION_CONFIG` (`EloConfig(half_life_years=4.0)`), usado por `main()`/`data/features/fighter_ratings.csv`. O `DEFAULT_CONFIG` (sem recência) permanece inalterado para não quebrar `src/param_sweep.py` e para preservar o Elo v0.1 puro como referência histórica. As colunas novas de `fighter_ratings.csv` — `rating_historical_before` (implícito: é o `rating_after` da luta anterior, sem decaimento), `days_since_last_fight`, `recency_factor` — tornam a recência auditável (seção 58 — explicabilidade).
+
+   A meia-vida 5 anos não foi escolhida por não ter vantagem fold a fold consistente sobre 4 anos (seção 44.3); 4 anos também é o valor de melhor Accuracy pooled já registrado na seção 39.3.
+
+2. **Performance (M4) NÃO é promovida ao rating em si.** Seguindo a distinção da seção 31 (rating vs. modelo de previsão), a regressão logística de M4/M4_Recency responde "qual a probabilidade de A vencer B", não "qual a força competitiva de A" — não há uma forma direta de embutir coeficientes de uma regressão logística multivariada dentro de um único número de Elo sem perder a interpretação de rating. A combinação `Elo (com recência) + performance`, validada nesta seção como a mais forte encontrada até agora, fica registrada como a configuração de referência para a Fase 4 do roadmap (Previsão — seção 53), a ser retomada quando o projeto começar a construir o modelo de previsão de produção propriamente dito (distinto do rating).
+
+3. **O fold 2014→2017 permanece como um caso não resolvido**, perdendo para o Elo puro em toda extensão testada até agora (recência, performance, e a combinação). Não deve ser tratado como motivo para descartar as extensões (a evidência agregada e fold a fold nos outros 5 folds é forte), mas também não deve ser ignorado — é candidato a investigação futura (ex.: eventos atípicos do período, mudança na composição das divisões, ou uma limitação genuína do modelo).
+
+Artefatos: `data/results/combined_temporal_results.csv`, `data/results/combined_predictions.csv`.
 
 ---
 

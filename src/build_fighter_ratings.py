@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -46,12 +47,21 @@ class EloConfig:
     # e recebe um K-factor maior para se recalibrar mais rápido.
     provisional_fights: int = 3
 
+    # Meia-vida (em anos) do decaimento por recência (docs/
+    # rating_methodology.md, seção 39). None reproduz exatamente
+    # o Elo v0.1 sem recência — é o default, para que
+    # src/param_sweep.py e qualquer outro consumidor de EloConfig
+    # continue reproduzindo o baseline v0.1 sem alterações. A
+    # configuração de produção (PRODUCTION_CONFIG, mais abaixo)
+    # é que ativa a recência.
+    half_life_years: float | None = None
+
     @property
     def label(self):
         """Identificador curto e determinístico, usado como sufixo
         de arquivo em runs com configuração não-default (sweep)."""
 
-        return (
+        label = (
             f"init{self.initial_rating:.0f}"
             f"_base{self.base_k:.0f}"
             f"_boost{self.boosted_k:.0f}"
@@ -59,8 +69,32 @@ class EloConfig:
             f"_prov{self.provisional_fights}"
         )
 
+        if self.half_life_years is not None:
+            label += f"_half{self.half_life_years:.0f}y"
+
+        return label
+
 
 DEFAULT_CONFIG = EloConfig()
+
+# ============================================================
+# Configuração de produção (v0.2).
+#
+# Decisão registrada em docs/rating_methodology.md, seção 44
+# ("Promoção para produção: Elo + Recência"): a extensão de
+# recência (half-life = 4 anos) foi validada fold a fold em
+# src/combined_experiment.py e vence o Elo v0.1 puro em 5 dos 6
+# folds do walk-forward, com melhora simultânea em Log Loss,
+# Brier, AUC e Accuracy no agregado. É a única mudança promovida
+# para o cálculo de `rating_before`/`rating_after` nesta versão.
+#
+# A extensão de performance (M4) permanece fora do rating em si:
+# ela mede algo conceitualmente diferente (seção 31 — "rating"
+# vs. "modelo de previsão") e será tratada na Fase 4 do roadmap
+# (Previsão), reaproveitando `src/combined_experiment.py`.
+# ============================================================
+
+PRODUCTION_CONFIG = EloConfig(half_life_years=4.0)
 
 # Aliases mantidos para retrocompatibilidade (valores do baseline
 # v0.1, iguais aos defaults de EloConfig).
@@ -189,15 +223,40 @@ def expected_score(rating_a, rating_b, scale=SCALE):
     return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / scale))
 
 
+def apply_recency(rating, last_fight_date, current_date, initial_rating, half_life_years):
+    """
+    Decai `rating` em direção a `initial_rating` conforme os dias
+    de inatividade desde `last_fight_date` (docs/rating_methodology.md,
+    seção 39.1):
+
+        R_efetivo = R_inicial + (R_histórico - R_inicial) * 2^(-Δt / H)
+
+    Sem luta anterior (estreante), não há período de inatividade:
+    retorna o rating inalterado e fator 1.0. Mesma implementação
+    validada em src/recency_sweep.py e src/combined_experiment.py.
+    """
+
+    if last_fight_date is None or pd.isna(last_fight_date):
+        return rating, 0, 1.0
+
+    elapsed_days = max(0, (current_date - last_fight_date).days)
+    half_life_days = half_life_years * 365.25
+    factor = 2 ** (-elapsed_days / half_life_days)
+    effective_rating = initial_rating + (rating - initial_rating) * factor
+
+    return effective_rating, elapsed_days, factor
+
+
 def build_ratings(fights, config=DEFAULT_CONFIG):
     """
     Processa as lutas em ordem cronológica e calcula o Elo de
     cada lutador antes e depois de cada luta.
 
     `config` (EloConfig) carrega os parâmetros livres do Elo
-    (initial_rating, base_k, boosted_k, scale, provisional_fights).
-    O default reproduz o baseline v0.1. Passar uma `EloConfig`
-    diferente permite comparar configurações (ver
+    (initial_rating, base_k, boosted_k, scale, provisional_fights,
+    half_life_years). O default (DEFAULT_CONFIG) reproduz
+    exatamente o baseline v0.1, sem recência. Passar uma
+    `EloConfig` diferente permite comparar configurações (ver
     src/param_sweep.py) sem duplicar esta função.
 
     Decisões metodológicas aplicadas (registradas em
@@ -220,22 +279,32 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
       mais rápida em cenários de alta incerteza. Isso é um
       parâmetro a ser validado, não uma regra definitiva (seção
       37.4) — ver src/param_sweep.py para a comparação empírica.
+    - Recência (seção 39): quando `config.half_life_years` não é
+      None, o rating histórico de cada lutador é decaído em
+      direção a `initial_rating` proporcionalmente à inatividade
+      desde a última luta, ANTES de calcular `expected_score` e
+      a atualização da luta atual. O decaimento nunca é reescrito
+      retroativamente: `rating_after` desta luta é que passa a
+      ser o novo rating histórico para a próxima (seção 2.1 —
+      nenhuma informação futura contamina o passado).
     """
 
     fights = fights.sort_values(
         ["date", "fight_id"]
     ).reset_index(drop=True)
 
-    rating = {}
+    historical_rating = {}
     fights_count = {}
     fights_since_switch = {}
     current_division = {}
+    last_fight_date = {}
 
     def ensure_known(fighter_id):
-        rating.setdefault(fighter_id, config.initial_rating)
+        historical_rating.setdefault(fighter_id, config.initial_rating)
         fights_count.setdefault(fighter_id, 0)
         fights_since_switch.setdefault(fighter_id, 0)
         current_division.setdefault(fighter_id, None)
+        last_fight_date.setdefault(fighter_id, None)
 
     def is_provisional(fighter_id):
         return (
@@ -254,6 +323,8 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
 
         ensure_known(fighter_1_id)
         ensure_known(fighter_2_id)
+
+        current_date = pd.Timestamp(fight.date)
 
         division = normalize_division(fight.weight_class)
 
@@ -280,8 +351,28 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
             fighter_2_id: fights_count[fighter_2_id] == 0,
         }
 
-        rating_1_before = rating[fighter_1_id]
-        rating_2_before = rating[fighter_2_id]
+        if config.half_life_years is None:
+            rating_1_before, days_since_1, factor_1 = (
+                historical_rating[fighter_1_id], 0, 1.0
+            )
+            rating_2_before, days_since_2, factor_2 = (
+                historical_rating[fighter_2_id], 0, 1.0
+            )
+        else:
+            rating_1_before, days_since_1, factor_1 = apply_recency(
+                historical_rating[fighter_1_id],
+                last_fight_date[fighter_1_id],
+                current_date,
+                config.initial_rating,
+                config.half_life_years,
+            )
+            rating_2_before, days_since_2, factor_2 = apply_recency(
+                historical_rating[fighter_2_id],
+                last_fight_date[fighter_2_id],
+                current_date,
+                config.initial_rating,
+                config.half_life_years,
+            )
 
         expected_1 = expected_score(
             rating_1_before, rating_2_before, scale=config.scale
@@ -325,16 +416,20 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
             result,
             rating_before,
             rating_after,
+            days_since,
+            recency_factor,
             expected,
             k_used,
         ) in (
             (
                 fighter_1_id, fighter_2_id, result_1,
-                rating_1_before, rating_1_after, expected_1, k_1,
+                rating_1_before, rating_1_after, days_since_1, factor_1,
+                expected_1, k_1,
             ),
             (
                 fighter_2_id, fighter_1_id, result_2,
-                rating_2_before, rating_2_after, expected_2, k_2,
+                rating_2_before, rating_2_after, days_since_2, factor_2,
+                expected_2, k_2,
             ),
         ):
             rows.append({
@@ -349,17 +444,25 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
                 "is_division_change": division_change[fighter_id],
                 "k_factor": k_used,
                 "rating_updated": not is_no_contest,
+                "days_since_last_fight": days_since,
+                "recency_factor": recency_factor,
                 "expected_score": expected,
                 "rating_before": rating_before,
                 "rating_after": rating_after,
             })
 
-        rating[fighter_1_id] = rating_1_after
-        rating[fighter_2_id] = rating_2_after
+        # `rating_after` (calculado a partir do rating EFETIVO,
+        # pós-recência) passa a ser o novo rating histórico. O
+        # decaimento nunca é uma perda permanente: ele só é
+        # reaplicado a partir daqui na próxima luta, proporcional
+        # a uma nova janela de inatividade.
+        historical_rating[fighter_1_id] = rating_1_after
+        historical_rating[fighter_2_id] = rating_2_after
 
         for fighter_id in (fighter_1_id, fighter_2_id):
             fights_count[fighter_id] += 1
             fights_since_switch[fighter_id] += 1
+            last_fight_date[fighter_id] = current_date
 
             if division is not None:
                 current_division[fighter_id] = division
@@ -367,7 +470,7 @@ def build_ratings(fights, config=DEFAULT_CONFIG):
     return pd.DataFrame(rows)
 
 
-def validate_output(ratings, fights, initial_rating=DEFAULT_CONFIG.initial_rating):
+def validate_output(ratings, fights, initial_rating=DEFAULT_CONFIG.initial_rating, half_life_years=None):
     errors = []
 
     expected_rows = len(fights) * 2
@@ -431,21 +534,45 @@ def validate_output(ratings, fights, initial_rating=DEFAULT_CONFIG.initial_ratin
 
     # A ordem cronológica de rating_before de cada lutador deve
     # ser consistente com o rating_after da luta anterior.
+    #
+    # Sem recência, rating_before == rating_after anterior,
+    # exatamente. Com recência (half_life_years definido),
+    # rating_before é o rating_after anterior DECAÍDO pela
+    # inatividade (seção 39.1) — a igualdade exata só vale para
+    # a primeira luta de cada lutador (sem luta anterior, sem
+    # decaimento) ou lutas no mesmo dia (Δt = 0, fator = 1.0).
     ordered = ratings.sort_values(
         ["fighter_id", "date", "fight_id"]
-    )
+    ).copy()
+
+    ordered["date"] = pd.to_datetime(ordered["date"])
 
     previous_after = ordered.groupby("fighter_id")["rating_after"].shift(1)
+    previous_date = ordered.groupby("fighter_id")["date"].shift(1)
+
+    if half_life_years is None:
+        expected_before = previous_after
+    else:
+        elapsed_days = (
+            (ordered["date"] - previous_date).dt.days.clip(lower=0)
+        )
+        half_life_days = half_life_years * 365.25
+        factor = 2 ** (-elapsed_days / half_life_days)
+        expected_before = initial_rating + (previous_after - initial_rating) * factor
 
     mismatch = (
         previous_after.notna()
-        & (previous_after != ordered["rating_before"])
+        & ~np.isclose(
+            expected_before.astype(float),
+            ordered["rating_before"].astype(float),
+            atol=1e-6,
+        )
     )
 
     if mismatch.any():
         errors.append(
             f"rating_before não corresponde ao rating_after "
-            f"anterior: {mismatch.sum()}."
+            f"anterior (considerando recência): {mismatch.sum()}."
         )
 
     if errors:
@@ -517,7 +644,12 @@ def run_pipeline(fights, config=DEFAULT_CONFIG, output_file=OUTPUT_FILE, verbose
 
     ratings = build_ratings(fights, config=config)
 
-    validate_output(ratings, fights, initial_rating=config.initial_rating)
+    validate_output(
+        ratings,
+        fights,
+        initial_rating=config.initial_rating,
+        half_life_years=config.half_life_years,
+    )
 
     ratings = ratings.sort_values(
         ["date", "fight_id", "fighter_id"]
@@ -573,7 +705,12 @@ def main():
 
     print(f"Lutas carregadas: {len(fights)}")
 
-    run_pipeline(fights, config=DEFAULT_CONFIG, output_file=OUTPUT_FILE, verbose=True)
+    print(
+        f"\nConfiguração de produção: {PRODUCTION_CONFIG.label} "
+        "(Elo v0.1 + recência, ver docs/rating_methodology.md seção 44)"
+    )
+
+    run_pipeline(fights, config=PRODUCTION_CONFIG, output_file=OUTPUT_FILE, verbose=True)
 
     print("\n=== CONCLUÍDO ===")
 

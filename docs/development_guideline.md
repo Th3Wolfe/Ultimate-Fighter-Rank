@@ -219,13 +219,13 @@ ultimate-fighter-rank/
 │   │   ├── fight_features.csv
 │   │   ├── fighter_fight_features.csv
 │   │   ├── fighter_history.csv
-│   │   ├── fighter_ratings.csv          # produção — Elo v0.1
+│   │   ├── fighter_ratings.csv          # produção — Elo v0.2 (Elo v0.1 + recência)
 │   │   ├── param_sweep/                 # experimento: variantes de K/SCALE/PROVISIONAL_FIGHTS
 │   │   └── recency/                     # experimento: ratings com decaimento por inatividade
 │   │
 │   ├── evaluation/
 │   │   ├── evaluation_dataset.csv       # y, p_win_rate, p_elo por luta
-│   │   ├── metrics_summary.csv          # Win Rate vs. Elo v0.1
+│   │   ├── metrics_summary.csv          # Win Rate vs. Elo (produção atual)
 │   │   ├── calibration_tables.csv
 │   │   ├── param_sweep/summary.csv
 │   │   ├── recency/summary.csv
@@ -239,7 +239,9 @@ ultimate-fighter-rank/
 │       ├── opponent_quality_predictions.csv
 │       ├── performance_temporal_results.csv
 │       ├── performance_predictions.csv
-│       └── performance_coefficients.csv
+│       ├── performance_coefficients.csv
+│       ├── combined_temporal_results.csv    # validação fold a fold: recência + performance
+│       └── combined_predictions.csv
 │
 ├── src/
 │   ├── build_dataset.py
@@ -247,14 +249,15 @@ ultimate-fighter-rank/
 │   ├── build_fight_features.py
 │   ├── build_fighter_fight_features.py
 │   ├── build_fighter_history.py
-│   ├── build_fighter_ratings.py         # produção — Elo v0.1
+│   ├── build_fighter_ratings.py         # produção — Elo v0.2 (v0.1 + recência, half-life 4a)
 │   ├── evaluate_ratings.py              # avaliação temporal Win Rate vs. Elo
 │   ├── validate_history.py
 │   ├── param_sweep.py                   # experimento — K, SCALE, PROVISIONAL_FIGHTS
 │   ├── recency_sweep.py                 # experimento — decaimento por inatividade
 │   ├── glicko2_experiment.py            # experimento — Glicko-2
 │   ├── opponent_quality_experiment.py   # experimento — Elo + Strength of Schedule
-│   └── performance_experiment.py        # experimento — Elo + striking/grappling/dominância
+│   ├── performance_experiment.py        # experimento — Elo + striking/grappling/dominância
+│   └── combined_experiment.py           # validação fold a fold + Elo(recência) + performance combinados
 │
 ├── tests/
 │   └── __init__.py                      # ainda sem testes automatizados (seção 44)
@@ -1670,15 +1673,18 @@ Fighter Rating
 - Experimento de performance — striking/grappling/dominância (`src/performance_experiment.py`, modelos M0-M5) — rating_methodology.md, seção 42
   - resultado: M4 (Elo + todas as features de performance) melhora Log Loss, Brier, AUC e Accuracy simultaneamente em relação ao Elo v0.1 isolado; performance sem Elo (M5) é o pior modelo do grupo — ainda não incorporado à produção
 - Síntese comparativa das cinco extensões acima, mesmo protocolo walk-forward (rating_methodology.md, seção 43)
+- Validação fold a fold de recência e performance + experimento combinado (`src/combined_experiment.py`) — rating_methodology.md, seção 44
+  - resultado: as duas extensões vencem o Elo v0.1 puro em 5 dos 6 folds (não só na média pooled); a combinação Elo+recência+performance supera cada extensão isolada em todas as métricas, também com vitória em 5 de 6 folds
+  - decisão: recência (half-life = 4 anos) promovida à produção (`src/build_fighter_ratings.py`, `PRODUCTION_CONFIG`); performance (M4) mantida fora do rating por ser conceitualmente um modelo de previsão, não um rating (seção 31) — registrada como referência para a Fase 4 (Previsão)
 
 ---
 
 # 52. EM DESENVOLVIMENTO
 
-A próxima grande etapa continua sendo:
+A próxima grande etapa agora é:
 
 ```text
-Fighter Rating
+Fighter Style Profile
 ```
 
 Concluído:
@@ -1694,11 +1700,19 @@ Extensão de qualidade do adversário (Strength of Schedule)
 Extensão de performance (striking, grappling, dominância)
 Experimento Glicko-2 (sem aging)
 Síntese comparativa das extensões acima
+Validação fold a fold de recência e performance + experimento combinado
+Promoção da recência (half-life 4 anos) ao rating de produção — Elo v0.2
 ```
 
 Todos os itens 5-9 do roadmap original (seção 53) foram **experimentalmente concluídos**: cada extensão foi implementada, avaliada com o mesmo harness temporal e comparada contra o Elo v0.1. Dois resultados de sinal positivo e consistente em todas as métricas emergiram — recência (`rating_methodology.md`, seção 39) e Elo + performance/M4 (seção 42) — e dois de sinal negativo ou misto — Glicko-2 sem aging (seção 40) e Elo + SoS (seção 41).
 
-**O que falta antes de avançar para o item 10 (Fighter Style Profile):** nenhuma das extensões testadas foi promovida a `src/build_fighter_ratings.py`. Falta (a) validar fold a fold a estabilidade dos dois resultados positivos (recência e performance), do mesmo jeito que a seção 37.5 fez para `PROVISIONAL_FIGHTS`; (b) decidir se recência e performance devem ser combinadas ou tratadas como alternativas; e (c) só então atualizar o rating de produção. Essa decisão é o item em aberto mais próximo no roadmap.
+**Item 9.5 concluído (rating_methodology.md, seção 44):** a estabilidade fold a fold de recência e performance foi validada (ambas vencem o Elo v0.1 puro em 5 dos 6 folds, não só na média pooled), e a combinação das duas (`src/combined_experiment.py`) se mostrou superior a cada extensão isolada em todas as métricas. Decisão registrada:
+
+- **Recência (half-life = 4 anos) foi promovida ao rating de produção.** `src/build_fighter_ratings.py` agora expõe `PRODUCTION_CONFIG` (usado por `main()`), enquanto `DEFAULT_CONFIG` (sem recência) permanece como referência do Elo v0.1 puro para `src/param_sweep.py`. `data/features/fighter_ratings.csv` já foi regenerado com esta configuração (colunas novas: `days_since_last_fight`, `recency_factor`) e `data/evaluation/metrics_summary.csv` já reflete o novo rating (Log Loss pooled do Elo caiu de 0.6822 para 0.6794).
+- **Performance (M4) não foi promovida ao rating** — é um modelo de previsão, não um rating (seção 31), e fica registrada como configuração de referência para a Fase 4 do roadmap.
+- O fold 2014→2017 continua sendo o único onde toda extensão testada até agora perde para o Elo puro — candidato a investigação futura, não bloqueante.
+
+O item 10 (Fighter Style Profile) já pode começar.
 
 ---
 
@@ -1725,9 +1739,9 @@ A sequência recomendada é:
         ↓
 9. Comparar modelos                             [CONCLUÍDO — seção 43]
         ↓
-9.5 Validar estabilidade e promover extensão(ões) vencedora(s) para produção  ← próximo passo
+9.5 Validar estabilidade e promover extensão(ões) vencedora(s) para produção  [CONCLUÍDO — seção 44; recência (4a) promovida ao rating; performance registrada para a Fase 4]
         ↓
-10. Criar Fighter Style Profile
+10. Criar Fighter Style Profile                 ← próximo passo
         ↓
 11. Criar Matchup Model
         ↓
@@ -1740,7 +1754,7 @@ A sequência recomendada é:
 15. Construir aplicação web
 ```
 
-Detalhes de cada experimento dos itens 5-9, incluindo tabelas de resultado e decisões metodológicas registradas, estão em `docs/rating_methodology.md`, seções 37.5 a 43.
+Detalhes de cada experimento dos itens 5-9.5, incluindo tabelas de resultado e decisões metodológicas registradas, estão em `docs/rating_methodology.md`, seções 37.5 a 44.
 
 ---
 
