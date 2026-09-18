@@ -213,11 +213,33 @@ ultimate-fighter-rank/
 │   │   ├── fights.csv
 │   │   └── round_stats.csv
 │   │
-│   └── features/
-│       ├── round_stats_numeric.csv
-│       ├── fight_fighter_features.csv
-│       ├── fight_features.csv
-│       └── fighter_history.csv
+│   ├── features/
+│   │   ├── round_stats_numeric.csv
+│   │   ├── fight_fighter_features.csv
+│   │   ├── fight_features.csv
+│   │   ├── fighter_fight_features.csv
+│   │   ├── fighter_history.csv
+│   │   ├── fighter_ratings.csv          # produção — Elo v0.1
+│   │   ├── param_sweep/                 # experimento: variantes de K/SCALE/PROVISIONAL_FIGHTS
+│   │   └── recency/                     # experimento: ratings com decaimento por inatividade
+│   │
+│   ├── evaluation/
+│   │   ├── evaluation_dataset.csv       # y, p_win_rate, p_elo por luta
+│   │   ├── metrics_summary.csv          # Win Rate vs. Elo v0.1
+│   │   ├── calibration_tables.csv
+│   │   ├── param_sweep/summary.csv
+│   │   ├── recency/summary.csv
+│   │   ├── recency/fold_metrics.csv
+│   │   └── glicko2/
+│   │
+│   └── results/
+│       ├── glicko2_temporal_results.csv
+│       ├── glicko2_predictions.csv
+│       ├── opponent_quality_temporal_results.csv
+│       ├── opponent_quality_predictions.csv
+│       ├── performance_temporal_results.csv
+│       ├── performance_predictions.csv
+│       └── performance_coefficients.csv
 │
 ├── src/
 │   ├── build_dataset.py
@@ -225,14 +247,28 @@ ultimate-fighter-rank/
 │   ├── build_fight_features.py
 │   ├── build_fighter_fight_features.py
 │   ├── build_fighter_history.py
-│   ├── build_fighter_ratings.py
-│   └── validate_history.py
+│   ├── build_fighter_ratings.py         # produção — Elo v0.1
+│   ├── evaluate_ratings.py              # avaliação temporal Win Rate vs. Elo
+│   ├── validate_history.py
+│   ├── param_sweep.py                   # experimento — K, SCALE, PROVISIONAL_FIGHTS
+│   ├── recency_sweep.py                 # experimento — decaimento por inatividade
+│   ├── glicko2_experiment.py            # experimento — Glicko-2
+│   ├── opponent_quality_experiment.py   # experimento — Elo + Strength of Schedule
+│   └── performance_experiment.py        # experimento — Elo + striking/grappling/dominância
+│
+├── tests/
+│   └── __init__.py                      # ainda sem testes automatizados (seção 44)
+│
+├── notebooks/                           # ainda vazio
 │
 ├── docs/
+│   ├── development_guideline.md
 │   ├── rating_methodology.md
-│   └── development_guideline.md
+│   ├── data_model.md
+│   └── identity_resolution.md
 │
 ├── .gitignore
+├── requirements.txt
 ├── README.md
 └── ...
 ```
@@ -240,6 +276,8 @@ ultimate-fighter-rank/
 A estrutura pode evoluir.
 
 Novos módulos devem ser adicionados respeitando a separação de responsabilidades.
+
+Um script em `src/` que não sobrescreve os artefatos de produção (`data/features/fighter_ratings.csv`, `data/evaluation/metrics_summary.csv`) e grava seus próprios resultados em uma subpasta dedicada de `data/features/`, `data/evaluation/` ou `data/results/` é, por definição, um **experimento** (seção 45) — não uma mudança de produção. Todos os scripts marcados como "experimento" acima seguem essa regra.
 
 ---
 
@@ -1488,8 +1526,10 @@ Documentos importantes:
 
 ```text
 docs/
-├── development_guideline.md
-└── rating_methodology.md
+├── development_guideline.md    # este documento
+├── rating_methodology.md       # metodologia e resultados de todos os experimentos de rating
+├── data_model.md               # schema das tabelas processadas, de features e de resultados
+└── identity_resolution.md      # como fighter_id é resolvido e exceções auditadas
 ```
 
 Novas decisões relevantes devem ser documentadas.
@@ -1619,6 +1659,17 @@ Fighter Rating
   - split temporal simples (2019+) e walk-forward expansivo (janelas de 3 anos a partir de 2011), seção 38.4
   - Log Loss, Brier, ROC AUC, Accuracy e Calibration calculados lado a lado para os dois modelos (seção 38.5)
   - resultado: nenhum modelo domina em todas as métricas — Win Rate leva em Accuracy/AUC, Elo é muito mais estável em Log Loss por não produzir probabilidades degeneradas (0.0/1.0); detalhes e implicação para o roadmap em rating_methodology.md, seção 38.5
+- Sweep de parâmetros do Elo (`src/param_sweep.py`) — PROVISIONAL_FIGHTS, K-factor e SCALE testados isoladamente via walk-forward (rating_methodology.md, seções 37.5 e 37.6)
+  - resultado: nenhuma variação de K ou SCALE superou o baseline em Log Loss/Brier; `PROVISIONAL_FIGHTS=5` é candidato experimental com melhor Log Loss agregado, mas não uniforme entre períodos — baseline v0.1 (K=32/64, SCALE=400, PROVISIONAL_FIGHTS=3) permanece oficial
+- Experimento de recência (`src/recency_sweep.py`) — decaimento do rating por inatividade, meia-vida testada de 1 a 5 anos (rating_methodology.md, seção 39)
+  - resultado: meias-vidas de 2 a 5 anos melhoram Log Loss, Brier, AUC e Accuracy simultaneamente em relação ao Elo v0.1 — a única extensão isolada com esse comportamento além da seção seguinte; ainda não incorporada à produção
+- Experimento Glicko-2 (`src/glicko2_experiment.py`, sem aging por calendário) — rating_methodology.md, seção 40
+  - resultado: AUC e Accuracy melhores que o Elo v0.1, mas Log Loss e Brier piores — não adotado
+- Experimento de qualidade do adversário / Strength of Schedule (`src/opponent_quality_experiment.py`) — rating_methodology.md, seção 41
+  - resultado: Log Loss piora fortemente (0.68 → 0.78 pooled), sobretudo no fold mais escasso em histórico (2011-2014) — resultado negativo registrado, não adotado
+- Experimento de performance — striking/grappling/dominância (`src/performance_experiment.py`, modelos M0-M5) — rating_methodology.md, seção 42
+  - resultado: M4 (Elo + todas as features de performance) melhora Log Loss, Brier, AUC e Accuracy simultaneamente em relação ao Elo v0.1 isolado; performance sem Elo (M5) é o pior modelo do grupo — ainda não incorporado à produção
+- Síntese comparativa das cinco extensões acima, mesmo protocolo walk-forward (rating_methodology.md, seção 43)
 
 ---
 
@@ -1637,9 +1688,17 @@ Elo baseline v0.1
 Win Rate baseline (como modelo de previsão)
 Avaliação temporal (split simples + walk-forward)
 Comparação formal Win Rate vs. Elo v0.1
+Sweep de parâmetros do Elo (K, SCALE, PROVISIONAL_FIGHTS)
+Extensão de recência (decaimento por inatividade)
+Extensão de qualidade do adversário (Strength of Schedule)
+Extensão de performance (striking, grappling, dominância)
+Experimento Glicko-2 (sem aging)
+Síntese comparativa das extensões acima
 ```
 
-A partir daqui, a etapa "Fighter Rating" entra na fase de extensões (seção 53, itens 5-9): testar parâmetros do Elo, recência, qualidade do adversário e performance — sempre comparando contra o mesmo harness de avaliação temporal já construído, para que cada extensão seja validada com evidência (seção 57), não assumida como melhoria.
+Todos os itens 5-9 do roadmap original (seção 53) foram **experimentalmente concluídos**: cada extensão foi implementada, avaliada com o mesmo harness temporal e comparada contra o Elo v0.1. Dois resultados de sinal positivo e consistente em todas as métricas emergiram — recência (`rating_methodology.md`, seção 39) e Elo + performance/M4 (seção 42) — e dois de sinal negativo ou misto — Glicko-2 sem aging (seção 40) e Elo + SoS (seção 41).
+
+**O que falta antes de avançar para o item 10 (Fighter Style Profile):** nenhuma das extensões testadas foi promovida a `src/build_fighter_ratings.py`. Falta (a) validar fold a fold a estabilidade dos dois resultados positivos (recência e performance), do mesmo jeito que a seção 37.5 fez para `PROVISIONAL_FIGHTS`; (b) decidir se recência e performance devem ser combinadas ou tratadas como alternativas; e (c) só então atualizar o rating de produção. Essa decisão é o item em aberto mais próximo no roadmap.
 
 ---
 
@@ -1656,15 +1715,17 @@ A sequência recomendada é:
         ↓
 4. Comparar Win Rate vs Elo                     [CONCLUÍDO — v0.1]
         ↓
-5. Testar parâmetros do Elo                     ← próximo passo
+5. Testar parâmetros do Elo                     [CONCLUÍDO — experimental, seções 37.5/37.6]
         ↓
-6. Adicionar recência
+6. Adicionar recência                           [CONCLUÍDO — experimental, seção 39; positivo]
         ↓
-7. Adicionar qualidade do adversário
+7. Adicionar qualidade do adversário             [CONCLUÍDO — experimental, seção 41; negativo]
         ↓
-8. Adicionar performance
+8. Adicionar performance                        [CONCLUÍDO — experimental, seção 42; positivo]
         ↓
-9. Comparar modelos
+9. Comparar modelos                             [CONCLUÍDO — seção 43]
+        ↓
+9.5 Validar estabilidade e promover extensão(ões) vencedora(s) para produção  ← próximo passo
         ↓
 10. Criar Fighter Style Profile
         ↓
@@ -1678,6 +1739,8 @@ A sequência recomendada é:
         ↓
 15. Construir aplicação web
 ```
+
+Detalhes de cada experimento dos itens 5-9, incluindo tabelas de resultado e decisões metodológicas registradas, estão em `docs/rating_methodology.md`, seções 37.5 a 43.
 
 ---
 

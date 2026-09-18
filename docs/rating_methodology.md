@@ -1188,7 +1188,244 @@ Lutas de categorias não padrão (`Catch Weight`, `Open Weight`) e lutas de even
 
 A estreia de um lutador e as primeiras lutas seguintes a uma mudança de divisão usam um K-factor maior (`BOOSTED_K`, atualmente 64, contra `BASE_K` = 32), para permitir uma recalibração mais rápida do rating em cenários de alta incerteza — reaproveitando a mesma lógica de "small sample problem" (seção 13) para o caso de mudança de divisão.
 
-Os valores de `INITIAL_RATING` (1500), `BASE_K` (32), `BOOSTED_K` (64), `SCALE` (400) e `PROVISIONAL_FIGHTS` (3) são pontos de partida arbitrários do baseline v0.1 e devem ser comparados empiricamente com outras configurações antes de serem considerados definitivos.
+Os valores de INITIAL_RATING (1500), BASE_K (32), BOOSTED_K (64), SCALE (400) e PROVISIONAL_FIGHTS (3) foram definidos como pontos de partida arbitrários do baseline v0.1. O primeiro experimento de parâmetros avaliou especificamente PROVISIONAL_FIGHTS e mostrou que 5 apresenta melhor desempenho agregado, embora com variação relevante entre períodos; por isso, conforme registrado na seção 37.5, 3 permanece como configuração oficial do baseline até que um procedimento de seleção de hiperparâmetros com avaliação verdadeiramente fora da amostra seja adotado."
+
+## 37.5 Avaliação experimental de PROVISIONAL_FIGHTS
+
+O baseline v0.1 utilizava PROVISIONAL_FIGHTS = 3 de forma provisória. Para avaliar se a duração dessa janela influencia a qualidade preditiva do Elo, foi realizado um sweep temporal mantendo os demais parâmetros constantes:
+
+INITIAL_RATING = 1500
+BASE_K = 32
+BOOSTED_K = 64
+SCALE = 400
+
+Foram comparados:
+
+PROVISIONAL_FIGHTS = 1, 3, 5, 7, 9
+
+A avaliação utilizou o mesmo harness de walk-forward temporal empregado na seção 38, com seis períodos de teste de três anos. O Log Loss foi utilizado como métrica principal, acompanhado de Brier Score, ROC AUC e Accuracy.
+
+Resultado agregado
+PROVISIONAL_FIGHTS	Log Loss	Brier	ROC AUC	Accuracy
+1	0.6835	0.2453	0.5515	0.5530
+3	0.6822	0.2446	0.5574	0.5597
+5	0.6814	0.2442	0.5596	0.5619
+7	0.6817	0.2444	0.5570	0.5614
+9	0.6821	0.2446	0.5558	0.5604
+
+O valor 5 apresentou o melhor desempenho agregado nas quatro métricas consideradas. Em relação ao baseline 3, apresentou melhora de aproximadamente 0.0008 em Log Loss, 0.0004 em Brier Score, 0.0022 em ROC AUC e 0.0022 em Accuracy.
+
+Entretanto, a análise fold a fold mostrou que o resultado não é uniforme entre os períodos históricos. Considerando Log Loss, os valores que apresentaram o melhor resultado em cada janela foram:
+
+2011–2014 → provisional_5
+2014–2017 → provisional_9
+2017–2020 → provisional_1
+2020–2023 → provisional_9
+2023–2026 → provisional_5
+2026–2029 → provisional_1
+
+Portanto, nenhum valor dominou todos os períodos. Os valores 1, 5 e 9 venceram dois folds cada, enquanto 3 e 7 não apresentaram o menor Log Loss em nenhum dos seis folds.
+
+O resultado sugere que a duração da janela provisional influencia o desempenho do rating, mas que essa influência depende do período histórico. Não há evidência suficiente para afirmar que um único valor fixo seja universalmente correto.
+
+Decisão metodológica
+
+PROVISIONAL_FIGHTS = 5 será considerado candidato experimental, mas não será incorporado definitivamente ao baseline v0.1 neste momento.
+
+O valor 3 permanece como configuração oficial do baseline enquanto novas etapas metodológicas são investigadas. O resultado do sweep será utilizado como evidência para a evolução futura do tratamento de baixa quantidade de observações.
+
+A análise também reforça a hipótese apresentada na seção 13: o problema de amostras pequenas pode ser melhor tratado por uma representação de incerteza ou por um mecanismo dependente da quantidade e qualidade das observações, em vez de simplesmente escolher uma janela fixa por otimização sobre os mesmos folds de avaliação.
+
+O experimento foi preservado em:
+
+src/param_sweep.py
+data/evaluation/param_sweep/summary.csv
+data/features/param_sweep/
+
+A escolha definitiva de parâmetros deverá utilizar um procedimento que mantenha períodos de avaliação realmente fora da seleção dos hiperparâmetros, evitando transformar repetidos backtests temporais no mesmo conjunto de ajuste.
+
+## 37.6 Avaliação experimental de K-factor e SCALE
+
+O mesmo script (`src/param_sweep.py`) também testou variações de `BASE_K`/`BOOSTED_K` e de `SCALE`, isolando um parâmetro por vez (seção 26). Resultado agregado (pooled, walk-forward completo 2011→2029, n=7.232, modelo Elo):
+
+| Config                     | base_k | boosted_k | scale | Log Loss | Brier  | AUC    | Accuracy |
+|----------------------------|-------:|----------:|------:|---------:|-------:|-------:|---------:|
+| baseline_v0.1              |     32 |        64 |   400 |   0.6822 | 0.2446 | 0.5574 |   0.5597 |
+| k_menor_16_32              |     16 |        32 |   400 |   0.6853 | 0.2461 | 0.5526 |   0.5567 |
+| k_menor_24_48              |     24 |        48 |   400 |   0.6833 | 0.2451 | 0.5551 |   0.5578 |
+| sem_boost_k_igual_base     |     32 |        32 |   400 |   0.6847 | 0.2458 | 0.5510 |   0.5610 |
+| boost_k_maior_96           |     32 |        96 |   400 |   0.6836 | 0.2452 | 0.5594 |   0.5607 |
+| scale_200                  |     32 |        64 |   200 |   0.6839 | 0.2453 | 0.5648 |   0.5653 |
+| scale_600                  |     32 |        64 |   600 |   0.6839 | 0.2454 | 0.5542 |   0.5577 |
+
+Nenhuma variação de `K` ou `SCALE` superou o baseline em Log Loss/Brier. `scale_200` apresentou o melhor AUC e Accuracy do grupo, mas piorou Log Loss e Brier — o mesmo padrão de "nenhum modelo domina todas as métricas" já visto na seção 38.5.
+
+**Decisão metodológica:** `BASE_K=32`, `BOOSTED_K=64` e `SCALE=400` permanecem como configuração oficial do baseline v0.1. Não há evidência, nesta rodada, para alterar nenhum dos dois. Combinado com a seção 37.5, a única variação do Elo v0.1 com sinal de melhora consistente encontrada até aqui no `param_sweep.py` é `PROVISIONAL_FIGHTS=5` (candidato experimental, ainda não incorporado).
+
+---
+
+# 39. Experimento de recência
+
+Implementado em `src/recency_sweep.py`, conforme item 6 do roadmap (seção 53 do `development_guideline.md`).
+
+## 39.1 Metodologia
+
+Recência é aplicada como um decaimento do rating em direção ao `INITIAL_RATING`, proporcional ao tempo de inatividade desde a última luta, **antes** de calcular o `expected_score` da próxima luta:
+
+```text
+R_efetivo = R_inicial + (R_histórico - R_inicial) * 2^(-Δt / H)
+```
+
+onde `Δt` é o número de dias desde a última luta do lutador e `H` é a meia-vida (half-life), em dias. O rating histórico já registrado (`rating_after` de cada luta) não é reescrito — o decaimento afeta apenas o `rating_before` efetivo usado na luta seguinte, preservando a temporalidade (seção 2.1).
+
+Foram testadas cinco meias-vidas (1, 2, 3, 4 e 5 anos) contra o baseline sem recência (Elo v0.1), usando o mesmo protocolo walk-forward de seis folds (2011→2029, n pooled = 7.232).
+
+## 39.2 Resultado agregado (pooled)
+
+| Config        | Half-life | Log Loss | Brier  | AUC    | Accuracy |
+|---------------|----------:|---------:|-------:|-------:|---------:|
+| baseline      |         — |   0.6822 | 0.2446 | 0.5574 |   0.5597 |
+| half_life_1y  |         1 |   0.6852 | 0.2460 | 0.5826 |   0.5622 |
+| half_life_2y  |         2 |   0.6816 | 0.2443 | 0.5913 |   0.5736 |
+| half_life_3y  |         3 |   0.6801 | 0.2435 | 0.5927 |   0.5796 |
+| half_life_4y  |         4 |   0.6794 | 0.2432 | 0.5917 |   0.5810 |
+| half_life_5y  |         5 |   0.6791 | 0.2431 | 0.5892 |   0.5783 |
+
+## 39.3 Interpretação
+
+Diferente de todas as extensões testadas até a seção 37.6, **meias-vidas entre 2 e 5 anos melhoram simultaneamente as quatro métricas** em relação ao baseline sem recência — não há o padrão de "cada modelo ganha em uma métrica diferente" observado em Win Rate vs. Elo (seção 38.5) ou no sweep de K/Scale (seção 37.6). Apenas `half_life_1y` (decaimento muito agressivo) piora Log Loss e Brier em relação ao baseline.
+
+Dentro da faixa vencedora, o melhor Log Loss/Brier é de `half_life_5y`, o melhor Accuracy é de `half_life_4y`, e o melhor AUC é de `half_life_3y` — as diferenças entre 3, 4 e 5 anos são pequenas e não foi feita uma análise fold a fold para saber se algum desses três domina de forma consistente ao longo do tempo (o mesmo cuidado da seção 37.5 se aplica aqui: uma média pooled pode esconder inversões por período).
+
+**Decisão metodológica:** a recência é o candidato mais forte encontrado até agora para evoluir o Elo v0.1 — é a única extensão com melhora simultânea em todas as métricas — mas **ainda não foi incorporada à produção** (`src/build_fighter_ratings.py` continua sem decaimento). Antes de promovê-la:
+
+1. repetir a análise fold a fold da seção 37.5 para escolher a meia-vida com evidência robusta ao período, não apenas pooled;
+2. decidir se a recência deve substituir o baseline v0.1 ou coexistir com ele como uma camada opcional.
+
+Os artefatos do experimento estão em `data/evaluation/recency/summary.csv`, `data/evaluation/recency/fold_metrics.csv` e `data/features/recency/<config>/fighter_ratings.csv`.
+
+---
+
+# 40. Experimento Glicko-2
+
+Implementado em `src/glicko2_experiment.py`, usando a biblioteca `glicko2==2.1.0`, conforme item "outros modelos de rating" da seção 27.
+
+## 40.1 Metodologia
+
+Glicko-2 é atualizado luta a luta, em ordem cronológica, com os valores padrão da biblioteca: `rating=1500`, `RD=350`, `volatility=0.06`. Cada luta é prevista **antes** de atualizar o rating dos dois lutadores, e NC/empates não entram na avaliação nem atualizam o rating — reaproveitando as mesmas regras já validadas para o Elo (seções 37.1 e 38.3). O mesmo protocolo walk-forward de seis folds (2011→2029) foi usado.
+
+**Limitação conhecida e não resolvida:** esta implementação não aplica o "aging" por calendário do Glicko-2 completo (o aumento de RD — incerteza — durante períodos de inatividade). Isso significa que o principal mecanismo pelo qual o Glicko-2 trataria inatividade de forma nativa não está em uso neste experimento; os resultados abaixo descrevem apenas a atualização luta a luta sem esse componente.
+
+## 40.2 Resultado (pooled, mesmo protocolo da seção 39)
+
+| Modelo      | Log Loss | Brier  | AUC    | Accuracy |
+|-------------|---------:|-------:|-------:|---------:|
+| Elo v0.1    |   0.6822 | 0.2446 | 0.5574 |   0.5597 |
+| Glicko-2    |   0.7037 | 0.2527 | 0.5684 |   0.5684 |
+
+## 40.3 Interpretação
+
+O Glicko-2 (sem aging) tem AUC e Accuracy melhores que o Elo v0.1, mas Log Loss e Brier claramente piores — o mesmo padrão de não-dominância já visto na comparação Win Rate vs. Elo (seção 38.5). Não foi investigada a causa exata da diferença de calibração (não é o mesmo tipo de problema de probabilidades degeneradas 0/1 do Win Rate, já que Glicko-2 também usa uma função logística), então essa explicação não deve ser assumida sem verificação.
+
+**Decisão metodológica:** o Glicko-2, nesta implementação sem aging, não é adotado como substituto do Elo v0.1. Uma versão com aging por calendário — o diferencial conceitual real do Glicko-2 sobre o Elo — não foi testada e é candidata a um experimento futuro, especialmente por ser conceitualmente parecida com a recência da seção 39 (ambas tratam inatividade), mas por um mecanismo diferente (incerteza crescente vs. decaimento do rating).
+
+Artefatos: `data/results/glicko2_temporal_results.csv`, `data/results/glicko2_predictions.csv`.
+
+---
+
+# 41. Experimento de qualidade do adversário (Strength of Schedule)
+
+Implementado em `src/opponent_quality_experiment.py`, conforme item 7 do roadmap (seção 53).
+
+## 41.1 Metodologia
+
+Para cada lutador, calcula-se o Strength of Schedule (SoS): a média dos ratings Elo dos adversários enfrentados até aquele ponto. O modelo combina Elo e SoS via regressão logística:
+
+```text
+P(A) = sigmoid(intercept + beta_elo * (Elo_A - Elo_B) + beta_sos * (SoS_A - SoS_B))
+```
+
+Os pesos (`beta_elo`, `beta_sos`) são ajustados **apenas com dados anteriores ao período de teste** de cada fold do walk-forward — nunca com o próprio período de teste —, seguindo a mesma disciplina temporal das demais seções.
+
+## 41.2 Resultado (pooled, n=7.232)
+
+| Modelo         | Log Loss | Brier  | AUC    | Accuracy |
+|----------------|---------:|-------:|-------:|---------:|
+| Elo (só)       |   0.6824 | 0.2447 | 0.5568 |   0.5618 |
+| Elo + SoS      |   0.7847 | 0.2758 | 0.5359 |   0.5787 |
+
+A Accuracy melhora, mas o Log Loss piora drasticamente — mais de 0.1 acima do Elo isolado. Por fold, o problema é mais visível: no fold 2011→2014 (o mais escasso em histórico), o Log Loss do modelo Elo+SoS chega a 1.125, contra 0.684 do Elo isolado no mesmo fold — sugerindo previsões extremas e mal calibradas exatamente no período com menos dados por lutador para estimar SoS de forma confiável.
+
+## 41.3 Interpretação
+
+Este é um resultado negativo, não uma falha do experimento: seguindo o princípio da seção 26, o resultado deve ser registrado tal como saiu, sem tentar "consertar" a fórmula depois de ver que ela não funcionou. A hipótese mais provável é que a regressão logística ajustada com poucos exemplos (folds iniciais) produz coeficientes mal calibrados — o mesmo problema de amostra pequena discutido na seção 13, agora manifestado em um modelo de combinação em vez de em um rating individual.
+
+**Decisão metodológica:** SoS via esta combinação logística **não é adotado**. Se o SoS for revisitado, candidatos a investigar antes de tentar novamente incluem: regularização da regressão logística, um SoS com menor variância (ex.: média ponderada pela recência das lutas do adversário) ou um ajuste único sobre todo o histórico pré-2011 em vez de refit por fold — mas nenhuma dessas alternativas foi testada, e nenhuma deve ser assumida como solução sem novo backtest.
+
+Artefatos: `data/results/opponent_quality_temporal_results.csv`, `data/results/opponent_quality_predictions.csv`.
+
+---
+
+# 42. Experimento de performance (striking, grappling, dominância)
+
+Implementado em `src/performance_experiment.py`, conforme item 8 do roadmap (seção 53).
+
+## 42.1 Metodologia
+
+Seis modelos, todos via regressão logística temporalmente ajustada (mesmo cuidado da seção 41.1 — fit somente com dados anteriores a cada fold de teste):
+
+| Modelo | Composição |
+|--------|------------|
+| M0 | Elo (diferença de rating) |
+| M1 | Elo + Striking (golpes significativos, totais, %) |
+| M2 | Elo + Grappling (quedas, %) |
+| M3 | Elo + Dominância (knockdowns, tempo de controle) |
+| M4 | Elo + todas as features de performance acima |
+| M5 | Apenas performance, sem Elo |
+
+Princípios seguidos: nenhuma informação futura é usada; o histórico de performance de cada lutador é atualizado somente após cada luta; percentuais são recalculados a partir dos totais acumulados (não é a média dos percentuais por luta); ausência de estatística não é convertida em zero, e sim tratada como valor faltante explícito (com uma coluna indicadora `__missing`); scaler e imputer são ajustados somente no treino de cada fold, nunca no fold de teste inteiro.
+
+## 42.2 Resultado (pooled, n=7.232 por modelo)
+
+| Modelo                    | Log Loss | Brier  | AUC    | Accuracy |
+|---------------------------|---------:|-------:|-------:|---------:|
+| M4 — Elo + All Performance |   0.6806 | 0.2437 | 0.5931 |   0.5625 |
+| M2 — Elo + Grappling       |   0.6813 | 0.2442 | 0.5862 |   0.5523 |
+| M0 — Elo                   |   0.6818 | 0.2444 | 0.5830 |   0.5592 |
+| M3 — Elo + Dominance       |   0.6821 | 0.2446 | 0.5826 |   0.5502 |
+| M1 — Elo + Striking        |   0.6826 | 0.2447 | 0.5865 |   0.5589 |
+| M5 — Performance Only      |   0.6884 | 0.2475 | 0.5634 |   0.5390 |
+
+## 42.3 Interpretação
+
+**M4 (Elo + todas as features de performance) é, entre todas as extensões testadas nas seções 37.6 a 42, a única configuração que melhora simultaneamente Log Loss, Brier, AUC e Accuracy em relação ao Elo v0.1 isolado** — não há trade-off entre métricas aqui, diferente de todos os outros experimentos deste documento (exceto a recência, seção 39, que também melhora tudo, mas isoladamente).
+
+M5 (performance sem Elo) é o pior modelo do grupo em todas as métricas, inclusive pior que o Elo isolado — reforçando o princípio da seção 56: estatísticas de performance por si só carregam menos sinal preditivo que o histórico de resultados acumulado no Elo. Elas parecem funcionar como complemento ao Elo, não como substituto.
+
+Os coeficientes por fold (`data/results/performance_coefficients.csv`) não foram analisados quanto à estabilidade entre períodos nesta rodada — antes de qualquer afirmação sobre quais estatísticas específicas (ex.: striking vs. grappling) pesam mais de forma consistente, seria necessário um exame fold a fold equivalente ao da seção 37.5.
+
+**Decisão metodológica:** M4 é o candidato mais forte para produção encontrado até agora, mas **ainda não foi incorporado a `src/build_fighter_ratings.py`**. Antes de promovê-lo, falta: (a) validação fold a fold da estabilidade do ganho (mesmo cuidado da seção 39.3), e (b) uma decisão sobre como combiná-lo com a recência da seção 39, já que os dois experimentos foram avaliados de forma independente e nunca testados juntos.
+
+Artefatos: `data/results/performance_temporal_results.csv`, `data/results/performance_predictions.csv`, `data/results/performance_coefficients.csv`.
+
+---
+
+# 43. Síntese comparativa das extensões do Elo v0.1
+
+Todas as extensões abaixo foram avaliadas com o mesmo protocolo walk-forward (seis folds, 2011→2029, n pooled = 7.232), o que permite compará-las lado a lado:
+
+| Extensão                         | Log Loss | Brier  | AUC    | Accuracy | Melhora em todas as métricas? |
+|-----------------------------------|---------:|-------:|-------:|---------:|:---:|
+| Elo v0.1 (baseline)                |   0.6822 | 0.2446 | 0.5574 |   0.5597 | — |
+| K/Scale (melhor variante, scale_200) |  0.6839 | 0.2453 | 0.5648 |   0.5653 | Não (perde Log Loss/Brier) |
+| Recência (half_life_4y)            |   0.6794 | 0.2432 | 0.5917 |   0.5810 | **Sim** |
+| Glicko-2 (sem aging)               |   0.7037 | 0.2527 | 0.5684 |   0.5684 | Não (perde Log Loss/Brier) |
+| Elo + SoS                          |   0.7847 | 0.2758 | 0.5359 |   0.5787 | Não (piora muito Log Loss) |
+| Elo + Performance (M4)             |   0.6806 | 0.2437 | 0.5931 |   0.5625 | **Sim** |
+
+Duas extensões — recência (seção 39) e performance (seção 42, modelo M4) — melhoram todas as quatro métricas em relação ao baseline, de forma independente uma da outra. Nenhuma combinação das duas foi testada até o momento.
+
+**Estado da produção:** `src/build_fighter_ratings.py` continua implementando apenas o Elo v0.1 puro (seção 37). Nenhuma das extensões desta seção 43 foi incorporada à produção — todas permanecem como experimentos isolados em `data/features/` e `data/results/`, aguardando validação fold a fold e uma decisão sobre combiná-las antes de substituir o baseline oficial. Isso corresponde ao item 9 do roadmap (seção 53 do `development_guideline.md`): "comparar modelos" está formalmente concluído para os pares testados nesta rodada, mas a etapa de escolher e promover um modelo para produção ainda está em aberto.
 
 ---
 
